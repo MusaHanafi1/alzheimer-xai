@@ -1,0 +1,53 @@
+"""Portable report and figures, generated from the run's saved metrics."""
+import base64,html,json
+from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import roc_curve,precision_recall_curve
+
+
+def build_report(out):
+    out=Path(out);r=json.loads((out/'metrics.json').read_text());m=r['final_calibrated_model'];prov=r['provenance']
+    plt.rcParams.update({'font.family':'DejaVu Sans','font.size':10,'axes.spines.top':False,'axes.spines.right':False,'axes.titleweight':'bold','axes.titlepad':15})
+    fig,axes=plt.subplots(2,3,figsize=(15,9),layout='constrained');fig.set_facecolor('#f8faf5')
+    fig.suptitle(r['label']+' | CDR-status classification',fontsize=16,fontweight='bold')
+    results=r['selection_cv'];ax=axes[0,0]
+    ax.barh([x['model'].replace('_',' ') for x in results],[x['selection_cv_roc_auc'] for x in results],color='#4d7453')
+    ax.set(xlim=(0,1.03),title='Development CV: model selection',xlabel='Selection ROC-AUC (not final test score)')
+    cm=np.array(m['confusion_matrix']);ax=axes[0,1];ax.imshow(cm,cmap='Greens')
+    for i in range(2):
+        for j in range(2):ax.text(j,i,str(cm[i,j]),ha='center',va='center',fontsize=22,color='white' if cm[i,j]>cm.max()/2 else '#173c35')
+    ax.set(xticks=[0,1],yticks=[0,1],xticklabels=['CDR = 0','CDR > 0'],yticklabels=['CDR = 0','CDR > 0'],xlabel='Predicted',ylabel='Observed',title=f'Final model: {m["n"]} held-out subjects')
+    ax=axes[0,2];imp=pd.read_csv(out/'feature_importance.csv').sort_values('mean_decrease_auc')
+    ax.barh(imp['feature'],imp['mean_decrease_auc'],color='#7f9759');ax.set(title='Training permutation importance',xlabel='Mean decrease in training ROC-AUC')
+    path=out/'synthetic_holdout_predictions.csv'
+    if path.exists() and prov['dataset']['data_kind']=='synthetic':
+        d=pd.read_csv(path);y=d.actual;p=d.probability
+        fpr,tpr,_=roc_curve(y,p);axes[1,0].plot(fpr,tpr,color='#386a50',lw=2);axes[1,0].plot([0,1],[0,1],'--',color='#aaa')
+        axes[1,0].set(title=f'Final model ROC-AUC: {m["roc_auc"]:.3f}',xlabel='False-positive rate',ylabel='True-positive rate')
+        fraction,mean=calibration_curve(y,p,n_bins=4,strategy='quantile');axes[1,1].plot(mean,fraction,'o-',color='#386a50');axes[1,1].plot([0,1],[0,1],'--',color='#aaa')
+        axes[1,1].set(title=f'Calibration: Brier {m["brier"]:.3f}',xlabel='Mean predicted probability',ylabel='Observed positive proportion',xlim=(0,1),ylim=(0,1))
+        precision,recall,_=precision_recall_curve(y,p);axes[1,2].plot(recall,precision,color='#386a50',lw=2);axes[1,2].axhline(y.mean(),ls='--',color='#aaa')
+        axes[1,2].set(title=f'Average precision: {m["average_precision"]:.3f}',xlabel='Recall',ylabel='Precision')
+    else:
+        for ax in axes[1]:ax.axis('off')
+    for ax in axes.ravel():ax.set_facecolor('#f8faf5')
+    fig.savefig(out/'benchmark.png',dpi=150);plt.close(fig)
+    image=base64.b64encode((out/'benchmark.png').read_bytes()).decode()
+    ci=r['confidence_intervals']
+    metric_rows=''.join(f'<tr><th>{html.escape(k.replace("_"," "))}</th><td>{m[k]:.3f}</td><td>{ci[k]["lower"]:.3f}–{ci[k]["upper"]:.3f}</td></tr>' for k in ['roc_auc','average_precision','recall','precision','f1','accuracy','brier'])
+    cv_rows=''.join(f'<tr><td>{html.escape(x["model"])}</td><td>{x["selection_cv_roc_auc"]:.3f}</td><td>{x["selection_cv_roc_auc_std"]:.3f}</td><td>{html.escape(json.dumps(x["parameters"]))}</td></tr>' for x in results)
+    sub_rows=''.join(f'<tr><td>{html.escape(x["feature"])}</td><td>{html.escape(x["group"])}</td><td>{x["n"]}</td><td>{x["positive_n"]}</td><td>{x["recall"]:.3f}</td><td>{x["precision"]:.3f}</td></tr>' for x in r['subgroups'])
+    limitations=''.join(f'<li>{html.escape(x)}</li>' for x in r['limitations'])
+    sha=prov['dataset']['sha256'];data=prov['dataset']
+    text=f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reproducible Dementia Classification · Musa Hanafi</title><style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f7f0;color:#1c382c;font:15px/1.7 Arial,sans-serif}}main{{max-width:1150px;margin:auto;padding:45px 30px}}h1{{font:48px/1.1 Georgia,serif;max-width:850px}}h2{{font:30px Georgia,serif;margin-top:45px}}.label{{font-size:11px;letter-spacing:2px;font-weight:bold;color:#526f31}}.intro{{max-width:800px;color:#52634b}}.facts{{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;margin:30px 0}}.facts>div{{background:#e8eedc;padding:20px}}.facts strong{{font:30px Georgia,serif;display:block}}.facts span{{font-size:11px}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:12px;text-align:left;border-bottom:1px solid #d6dfcd}}.table-wrap{{overflow:auto}}img{{width:100%;height:auto}}code{{overflow-wrap:anywhere;font-size:11px}}a{{color:#386a50}}.note{{font-size:12px;color:#617055}}button{{padding:12px 18px;background:#254530;color:white;border:0;cursor:pointer}}.explain{{padding:24px;border:1px solid #c8d5b9}}.slider{{width:100%;max-width:600px}}@media(max-width:600px){{h1{{font-size:35px}}.facts{{grid-template-columns:repeat(2,1fr)}}main{{padding:30px 20px}}}}@media print{{button,.explorer{{display:none}}body{{font-size:11px}}h1{{font-size:30px}}}}</style></head><body><main><div class="label">MUSA HANAFI / {html.escape(r['label'])}</div><h1>Explainable dementia classification.<br>A reproducible evaluation.</h1><p class="intro">A software benchmark for classifying contemporaneous CDR status using tabular cognitive, demographic, and imaging-derived features. This run uses {html.escape(data['data_kind'])} data. It is not a diagnostic tool or a future-risk prediction study.</p><div class="facts"><div><strong>{data['raw_records']}</strong><span>input visit records</span></div><div><strong>{data['subjects']}</strong><span>unique subjects retained</span></div><div><strong>{prov['development_subjects']} / {prov['test_subjects']}</strong><span>development / holdout subjects</span></div><div><strong>{m['roc_auc']:.3f}</strong><span>final calibrated test ROC-AUC</span></div></div><h2>What changed</h2><p>Preprocessing is fitted within training folds. One latest visit is retained per subject. Development cross-validation selects the model; sigmoid calibration and the decision threshold are fitted using development data. A separate holdout is used for final evaluation. No oversampling is used.</p><h2>Final held-out evaluation</h2><p>Selected base model: <strong>{html.escape(r['selected_model'])}</strong>. Prespecified sigmoid calibration; threshold <strong>{m['threshold']:.2f}</strong> selected from development out-of-fold predictions. A development recall target does not guarantee that recall on new data.</p><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Estimate</th><th>95% bootstrap interval</th></tr></thead><tbody>{metric_rows}</tbody></table></div><p class="note">{html.escape(prov['interval_method'])}. Small samples limit precision.</p><img alt="Six panels showing model selection scores, final confusion matrix, feature importance, ROC, calibration and precision-recall curves" src="data:image/png;base64,{image}"><h2>Development model comparison</h2><div class="table-wrap"><table><thead><tr><th>Candidate</th><th>Selection CV ROC-AUC</th><th>Fold SD</th><th>Selected parameters</th></tr></thead><tbody>{cv_rows}</tbody></table></div><p class="note">These are model-selection scores, not unbiased final performance estimates. The holdout did not choose the model.</p><h2>Subgroup error analysis</h2><div class="table-wrap"><table><thead><tr><th>Feature</th><th>Group</th><th>N</th><th>Positive N</th><th>Recall</th><th>Precision</th></tr></thead><tbody>{sub_rows}</tbody></table></div><p class="note">Small descriptive groups; this does not establish fairness. Zero-denominator precision or recall is reported as zero by the evaluation convention.</p><div id="threshold-explorer"></div><h2>Interpretability</h2><p>Permutation importance uses development data and measures model reliance, not causation. Correlated predictors can redistribute importance. When included, the SHAP example explains the selected uncalibrated model; it must not be interpreted as a decomposition of the final calibrated probability.</p><h2>Limitations</h2><ul>{limitations}</ul><h2>Reproduction & provenance</h2><p>Run <code>python train.py --shap</code> from the project directory after installing the pinned requirements. The generated JSON is the source of truth for this page.</p><p class="note">Dataset source: {html.escape(data['source'])}<br>SHA-256: <code>{sha}</code><br>Seed: {prov['seed']} · Development folds: {prov['selection_folds']} · Python: {prov['python']}</p><p class="note">Versioned inputs, metrics, plots, split hashes, model artifact, and dependency versions are included in the project package. Earlier README scores are superseded for this run; they are not a comparable baseline.</p><p><a href="https://github.com/MusaHanafi1/alzheimer-xai">Original project on GitHub ↗</a></p><button onclick="window.print()">Print / Save report as PDF</button></main>'''
+    if path.exists() and data['data_kind']=='synthetic':
+        predictions=pd.read_csv(path)[['actual','probability']].to_dict(orient='records')
+        script='''<script>const rows=__ROWS__;const el=document.getElementById('threshold-explorer');el.className='explorer explain';el.innerHTML='<h2>Explore the threshold</h2><p>Exploratory use of synthetic holdout predictions. This slider does not retrain the model or change the saved evaluation.</p><label for="threshold">Threshold: <strong id="th-value"></strong></label><br><input class="slider" id="threshold" type="range" min="0.01" max="0.99" step="0.01" value="__TH__"><p id="th-metrics" aria-live="polite"></p>';const slider=document.getElementById('threshold');function update(){let tp=0,fp=0,fn=0,tn=0;for(const r of rows){const pred=r.probability>=+slider.value;if(r.actual===1){if(pred)tp++;else fn++;}else{if(pred)fp++;else tn++;}}document.getElementById('th-value').textContent=(+slider.value).toFixed(2);document.getElementById('th-metrics').textContent=`Recall ${(tp/(tp+fn)||0).toFixed(3)} · Precision ${(tp/(tp+fp)||0).toFixed(3)} · TP ${tp} / FP ${fp} / FN ${fn} / TN ${tn}`;}slider.addEventListener('input',update);update();</script>'''.replace('__ROWS__',json.dumps(predictions)).replace('__TH__',str(m['threshold']))
+        text+=script
+    text+='</body></html>'
+    (out/'report.html').write_text(text)
